@@ -1,0 +1,1136 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ระบบฐานข้อมูลอุปกรณ์</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gradient-to-br from-blue-50 to-indigo-100 min-h-screen">
+    <div id="app" class="max-w-7xl mx-auto p-6"></div>
+
+    <script>
+        // *** ใส่ Client ID ของคุณตรงนี้ ***
+        // ตัวอย่าง: const CLIENT_ID = '123456789-abcdefg.apps.googleusercontent.com';
+        // ⚠️ ห้ามลืมเปลี่ยน! ไม่เช่นนั้นจะ Login Google ไม่ได้
+        const CLIENT_ID = '153990923358-rmmqjbrdundeh43cv2gnj65c0h1hngue.apps.googleusercontent.com';
+        const SCOPES = 'https://www.googleapis.com/auth/spreadsheets';
+
+        class EquipmentApp {
+            constructor() {
+                this.equipment = [];
+                this.borrowRecords = [];
+                this.returnRecords = [];
+                this.transferRecords = [];
+                this.claimRecords = [];
+                this.activeTab = 'equipment';
+                this.searchTerm = '';
+                this.isConnected = false;
+                this.spreadsheetId = '';
+                this.accessToken = '';
+                this.showSetup = false;
+                this.editingEquipment = null;
+                this.showEditModal = false;
+                
+                this.newEquipment = { type: 'AP', brand: '', serial: '', mac: '' };
+                this.newBorrow = { equipmentId: '', borrower: '', approver: '', quantity: 1, date: this.today() };
+                this.newReturn = { borrowRecordId: '', returnQuantity: 1, returnDate: this.today(), condition: 'ปกติ' };
+                this.newTransfer = { equipmentId: '', fromLocation: '', toLocation: '', transferDate: this.today(), note: '' };
+                this.newClaim = { equipmentId: '', claimDate: this.today(), issue: '', claimStatus: 'รอส่ง', note: '' };
+                
+                this.borrowSearchTerm = '';
+                this.returnSearchTerm = '';
+                this.transferSearchTerm = '';
+                this.claimSearchTerm = '';
+                
+                this.init();
+            }
+
+            today() {
+                return new Date().toISOString().split('T')[0];
+            }
+
+            init() {
+                this.loadLocalData();
+                this.checkAuthFromUrl();
+                this.render();
+            }
+
+            loadLocalData() {
+                const saved = {
+                    equipment: localStorage.getItem('equipment-list'),
+                    borrowRecords: localStorage.getItem('borrow-records'),
+                    returnRecords: localStorage.getItem('return-records'),
+                    transferRecords: localStorage.getItem('transfer-records'),
+                    claimRecords: localStorage.getItem('claim-records'),
+                    token: localStorage.getItem('google-token'),
+                    sheetId: localStorage.getItem('spreadsheet-id')
+                };
+                
+                if (saved.equipment) this.equipment = JSON.parse(saved.equipment);
+                if (saved.borrowRecords) this.borrowRecords = JSON.parse(saved.borrowRecords);
+                if (saved.returnRecords) this.returnRecords = JSON.parse(saved.returnRecords);
+                if (saved.transferRecords) this.transferRecords = JSON.parse(saved.transferRecords);
+                if (saved.claimRecords) this.claimRecords = JSON.parse(saved.claimRecords);
+                if (saved.token) this.accessToken = saved.token;
+                if (saved.sheetId) {
+                    this.spreadsheetId = saved.sheetId;
+                    this.isConnected = true;
+                }
+            }
+
+            checkAuthFromUrl() {
+                const hash = window.location.hash;
+                if (hash.includes('access_token')) {
+                    const token = hash.split('access_token=')[1].split('&')[0];
+                    this.accessToken = token;
+                    localStorage.setItem('google-token', token);
+                    window.history.replaceState(null, null, window.location.pathname);
+                    this.render();
+                }
+            }
+
+            handleGoogleAuth() {
+                if (!CLIENT_ID || CLIENT_ID === '') {
+                    alert('⚠️ ยังไม่ได้ตั้งค่า Client ID!\n\nวิธีแก้ไข:\n1. เปิดไฟล์ HTML ด้วย Notepad\n2. ค้นหา: const CLIENT_ID = \'\'\n3. แก้เป็น: const CLIENT_ID = \'YOUR_CLIENT_ID.apps.googleusercontent.com\'\n4. บันทึกไฟล์และอัปโหลดใหม่\n\nหรือกด F12 เปิด Console เพื่อดูรายละเอียด');
+                    console.error('CLIENT_ID is empty! Please set your Google OAuth Client ID in the code.');
+                    console.log('Current CLIENT_ID:', CLIENT_ID);
+                    console.log('Expected format: xxxxx-xxxxx.apps.googleusercontent.com');
+                    return;
+                }
+                
+                console.log('Starting Google Auth with Client ID:', CLIENT_ID);
+                const redirectUri = encodeURIComponent(window.location.origin + window.location.pathname);
+                const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${CLIENT_ID}&redirect_uri=${redirectUri}&response_type=token&scope=${encodeURIComponent(SCOPES)}`;
+                console.log('Redirect URI:', redirectUri);
+                console.log('Auth URL:', authUrl);
+                window.location.href = authUrl;
+            }
+
+            async connectToSheet() {
+                if (!this.spreadsheetId || !this.accessToken) return;
+                
+                try {
+                    await this.createSheetsIfNotExist();
+                    await this.loadFromGoogleSheets();
+                    
+                    localStorage.setItem('google-token', this.accessToken);
+                    localStorage.setItem('spreadsheet-id', this.spreadsheetId);
+                    this.isConnected = true;
+                    this.showSetup = false;
+                    alert('เชื่อมต่อสำเร็จ!');
+                    this.render();
+                } catch (error) {
+                    alert('เกิดข้อผิดพลาด: ' + error.message);
+                }
+            }
+
+            async createSheetsIfNotExist() {
+                const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${this.spreadsheetId}`, {
+                    headers: { 'Authorization': `Bearer ${this.accessToken}` }
+                });
+                
+                if (!response.ok) throw new Error('ไม่สามารถเข้าถึง Spreadsheet ได้');
+                
+                const data = await response.json();
+                const sheetNames = data.sheets.map(s => s.properties.title);
+                
+                const requests = [];
+                ['อุปกรณ์', 'บันทึกการยืม', 'บันทึกการคืน', 'บันทึกการโอน', 'บันทึกการเคลม'].forEach(name => {
+                    if (!sheetNames.includes(name)) {
+                        requests.push({ addSheet: { properties: { title: name } } });
+                    }
+                });
+                
+                if (requests.length > 0) {
+                    await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${this.spreadsheetId}:batchUpdate`, {
+                        method: 'POST',
+                        headers: { 'Authorization': `Bearer ${this.accessToken}`, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ requests })
+                    });
+                }
+                
+                await this.updateHeaders();
+            }
+
+            async updateHeaders() {
+                const headers = {
+                    equipment: [['ID', 'ประเภท', 'ยี่ห้อ', 'Serial', 'MAC', 'จำนวน', 'วันที่เพิ่ม']],
+                    borrow: [['ID', 'Equipment ID', 'ผู้ยืม', 'ผู้อนุมัติ', 'จำนวน', 'วันที่']],
+                    return: [['ID', 'Borrow ID', 'จำนวนคืน', 'วันที่คืน', 'สภาพ']],
+                    transfer: [['ID', 'Equipment ID', 'จาก', 'ถึง', 'วันที่', 'หมายเหตุ']],
+                    claim: [['ID', 'Equipment ID', 'วันที่', 'ปัญหา', 'สถานะ', 'หมายเหตุ']]
+                };
+                
+                await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${this.spreadsheetId}/values:batchUpdate`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${this.accessToken}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        valueInputOption: 'RAW',
+                        data: [
+                            { range: 'อุปกรณ์!A1:G1', values: headers.equipment },
+                            { range: 'บันทึกการยืม!A1:F1', values: headers.borrow },
+                            { range: 'บันทึกการคืน!A1:E1', values: headers.return },
+                            { range: 'บันทึกการโอน!A1:F1', values: headers.transfer },
+                            { range: 'บันทึกการเคลม!A1:F1', values: headers.claim }
+                        ]
+                    })
+                });
+            }
+
+            async loadFromGoogleSheets() {
+                try {
+                    const [eqRes, brRes, rtRes, trRes, clRes] = await Promise.all([
+                        fetch(`https://sheets.googleapis.com/v4/spreadsheets/${this.spreadsheetId}/values/อุปกรณ์!A2:G`, {
+                            headers: { 'Authorization': `Bearer ${this.accessToken}` }
+                        }),
+                        fetch(`https://sheets.googleapis.com/v4/spreadsheets/${this.spreadsheetId}/values/บันทึกการยืม!A2:F`, {
+                            headers: { 'Authorization': `Bearer ${this.accessToken}` }
+                        }),
+                        fetch(`https://sheets.googleapis.com/v4/spreadsheets/${this.spreadsheetId}/values/บันทึกการคืน!A2:E`, {
+                            headers: { 'Authorization': `Bearer ${this.accessToken}` }
+                        }),
+                        fetch(`https://sheets.googleapis.com/v4/spreadsheets/${this.spreadsheetId}/values/บันทึกการโอน!A2:F`, {
+                            headers: { 'Authorization': `Bearer ${this.accessToken}` }
+                        }),
+                        fetch(`https://sheets.googleapis.com/v4/spreadsheets/${this.spreadsheetId}/values/บันทึกการเคลม!A2:F`, {
+                            headers: { 'Authorization': `Bearer ${this.accessToken}` }
+                        })
+                    ]);
+
+                    const [eqData, brData, rtData, trData, clData] = await Promise.all([
+                        eqRes.json(), brRes.json(), rtRes.json(), trRes.json(), clRes.json()
+                    ]);
+
+                    if (eqData.values) {
+                        this.equipment = eqData.values.map(r => ({
+                            id: r[0], type: r[1] || '', brand: r[2] || '', serial: r[3] || '',
+                            mac: r[4] || '', totalQuantity: parseInt(r[5]) || 1, addedDate: r[6] || ''
+                        }));
+                        localStorage.setItem('equipment-list', JSON.stringify(this.equipment));
+                    }
+
+                    if (brData.values) {
+                        this.borrowRecords = brData.values.map(r => ({
+                            id: r[0], equipmentId: r[1] || '', borrower: r[2] || '',
+                            approver: r[3] || '', quantity: parseInt(r[4]) || 1, date: r[5] || ''
+                        }));
+                        localStorage.setItem('borrow-records', JSON.stringify(this.borrowRecords));
+                    }
+
+                    if (rtData.values) {
+                        this.returnRecords = rtData.values.map(r => ({
+                            id: r[0], borrowRecordId: r[1] || '', returnQuantity: parseInt(r[2]) || 1,
+                            returnDate: r[3] || '', condition: r[4] || ''
+                        }));
+                        localStorage.setItem('return-records', JSON.stringify(this.returnRecords));
+                    }
+
+                    if (trData.values) {
+                        this.transferRecords = trData.values.map(r => ({
+                            id: r[0], equipmentId: r[1] || '', fromLocation: r[2] || '', 
+                            toLocation: r[3] || '', transferDate: r[4] || '', note: r[5] || ''
+                        }));
+                        localStorage.setItem('transfer-records', JSON.stringify(this.transferRecords));
+                    }
+
+                    if (clData.values) {
+                        this.claimRecords = clData.values.map(r => ({
+                            id: r[0], equipmentId: r[1] || '', claimDate: r[2] || '',
+                            issue: r[3] || '', claimStatus: r[4] || '', note: r[5] || ''
+                        }));
+                        localStorage.setItem('claim-records', JSON.stringify(this.claimRecords));
+                    }
+                } catch (error) {
+                    console.error('Error loading:', error);
+                }
+            }
+
+            async saveToGoogleSheets() {
+                if (!this.isConnected) return;
+                
+                try {
+                    const eqRows = this.equipment.map(e => [e.id, e.type, e.brand, e.serial, e.mac, e.totalQuantity, e.addedDate]);
+                    const brRows = this.borrowRecords.map(b => [b.id, b.equipmentId, b.borrower, b.approver, b.quantity, b.date]);
+                    const rtRows = this.returnRecords.map(r => [r.id, r.borrowRecordId, r.returnQuantity, r.returnDate, r.condition]);
+                    const trRows = this.transferRecords.map(t => [t.id, t.equipmentId, t.fromLocation, t.toLocation, t.transferDate, t.note]);
+                    const clRows = this.claimRecords.map(c => [c.id, c.equipmentId, c.claimDate, c.issue, c.claimStatus, c.note]);
+                    
+                    await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${this.spreadsheetId}/values:batchUpdate`, {
+                        method: 'POST',
+                        headers: { 'Authorization': `Bearer ${this.accessToken}`, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            valueInputOption: 'RAW',
+                            data: [
+                                { range: 'อุปกรณ์!A2:G', values: eqRows.length ? eqRows : [[]] },
+                                { range: 'บันทึกการยืม!A2:F', values: brRows.length ? brRows : [[]] },
+                                { range: 'บันทึกการคืน!A2:E', values: rtRows.length ? rtRows : [[]] },
+                                { range: 'บันทึกการโอน!A2:F', values: trRows.length ? trRows : [[]] },
+                                { range: 'บันทึกการเคลม!A2:F', values: clRows.length ? clRows : [[]] }
+                            ]
+                        })
+                    });
+                } catch (error) {
+                    console.error('Error saving:', error);
+                }
+            }
+
+            addEquipment() {
+                if (!this.newEquipment.brand || !this.newEquipment.serial) {
+                    alert('กรุณากรอกยี่ห้อและ Serial');
+                    return;
+                }
+                
+                const eq = {
+                    id: Date.now().toString(),
+                    ...this.newEquipment,
+                    totalQuantity: 1,
+                    addedDate: this.today()
+                };
+                
+                this.equipment.push(eq);
+                localStorage.setItem('equipment-list', JSON.stringify(this.equipment));
+                this.saveToGoogleSheets();
+                this.newEquipment = { type: 'AP', brand: '', serial: '', mac: '' };
+                this.render();
+            }
+
+            deleteEquipment(id) {
+                if (!confirm('ยืนยันการลบอุปกรณ์นี้?')) return;
+                
+                this.equipment = this.equipment.filter(e => e.id !== id);
+                localStorage.setItem('equipment-list', JSON.stringify(this.equipment));
+                this.saveToGoogleSheets();
+                this.render();
+            }
+
+            editEquipment(id) {
+                const eq = this.equipment.find(e => e.id === id);
+                if (eq) {
+                    this.editingEquipment = { ...eq };
+                    this.showEditModal = true;
+                    this.render();
+                }
+            }
+
+            saveEditEquipment() {
+                const index = this.equipment.findIndex(e => e.id === this.editingEquipment.id);
+                if (index !== -1) {
+                    this.equipment[index] = { ...this.editingEquipment };
+                    localStorage.setItem('equipment-list', JSON.stringify(this.equipment));
+                    this.saveToGoogleSheets();
+                    this.showEditModal = false;
+                    this.editingEquipment = null;
+                    this.render();
+                }
+            }
+
+            addBorrowRecord() {
+                if (!this.newBorrow.equipmentId || !this.newBorrow.borrower || !this.newBorrow.approver) {
+                    alert('กรุณากรอกข้อมูลให้ครบ');
+                    return;
+                }
+                
+                const record = {
+                    id: Date.now().toString(),
+                    ...this.newBorrow,
+                    quantity: parseInt(this.newBorrow.quantity)
+                };
+                
+                this.borrowRecords.push(record);
+                localStorage.setItem('borrow-records', JSON.stringify(this.borrowRecords));
+                this.saveToGoogleSheets();
+                this.newBorrow = { equipmentId: '', borrower: '', approver: '', quantity: 1, date: this.today() };
+                this.render();
+            }
+
+            addReturnRecord() {
+                if (!this.newReturn.borrowRecordId) {
+                    alert('กรุณาเลือกรายการยืม');
+                    return;
+                }
+
+                const borrow = this.borrowRecords.find(b => b.id === this.newReturn.borrowRecordId);
+                if (!borrow) {
+                    alert('ไม่พบรายการยืม');
+                    return;
+                }
+
+                const returned = this.getReturnedCount(this.newReturn.borrowRecordId);
+                const canReturn = borrow.quantity - returned;
+
+                if (parseInt(this.newReturn.returnQuantity) > canReturn) {
+                    alert(`สามารถคืนได้สูงสุด ${canReturn} ชิ้น`);
+                    return;
+                }
+                
+                const record = {
+                    id: Date.now().toString(),
+                    ...this.newReturn,
+                    returnQuantity: parseInt(this.newReturn.returnQuantity)
+                };
+                
+                this.returnRecords.push(record);
+                localStorage.setItem('return-records', JSON.stringify(this.returnRecords));
+                this.saveToGoogleSheets();
+                this.newReturn = { borrowRecordId: '', returnQuantity: 1, returnDate: this.today(), condition: 'ปกติ' };
+                this.render();
+            }
+
+            addTransferRecord() {
+                if (!this.newTransfer.equipmentId || !this.newTransfer.fromLocation || !this.newTransfer.toLocation) {
+                    alert('กรุณากรอกข้อมูลให้ครบ');
+                    return;
+                }
+                
+                const record = {
+                    id: Date.now().toString(),
+                    ...this.newTransfer
+                };
+                
+                this.transferRecords.push(record);
+                localStorage.setItem('transfer-records', JSON.stringify(this.transferRecords));
+                this.saveToGoogleSheets();
+                this.newTransfer = { equipmentId: '', fromLocation: '', toLocation: '', transferDate: this.today(), note: '' };
+                this.render();
+            }
+
+            addClaimRecord() {
+                if (!this.newClaim.equipmentId || !this.newClaim.issue) {
+                    alert('กรุณากรอกข้อมูลให้ครบ');
+                    return;
+                }
+                
+                const record = {
+                    id: Date.now().toString(),
+                    ...this.newClaim
+                };
+                
+                this.claimRecords.push(record);
+                localStorage.setItem('claim-records', JSON.stringify(this.claimRecords));
+                this.saveToGoogleSheets();
+                this.newClaim = { equipmentId: '', claimDate: this.today(), issue: '', claimStatus: 'รอส่ง', note: '' };
+                this.render();
+            }
+
+            getReturnedCount(borrowRecordId) {
+                return this.returnRecords
+                    .filter(r => r.borrowRecordId === borrowRecordId)
+                    .reduce((sum, r) => sum + r.returnQuantity, 0);
+            }
+
+            getActualBorrowedCount(equipmentId) {
+                const totalBorrowed = this.borrowRecords
+                    .filter(r => r.equipmentId === equipmentId)
+                    .reduce((sum, r) => sum + r.quantity, 0);
+
+                const totalReturned = this.borrowRecords
+                    .filter(r => r.equipmentId === equipmentId)
+                    .reduce((sum, br) => sum + this.getReturnedCount(br.id), 0);
+
+                return totalBorrowed - totalReturned;
+            }
+
+            getRemainingCount(equipmentId) {
+                const eq = this.equipment.find(e => e.id === equipmentId);
+                if (!eq) return 0;
+                return eq.totalQuantity - this.getActualBorrowedCount(equipmentId);
+            }
+
+            getSummary() {
+                const summary = {};
+                this.equipment.forEach(eq => {
+                    if (!summary[eq.type]) {
+                        summary[eq.type] = { total: 0, remaining: 0 };
+                    }
+                    summary[eq.type].total += eq.totalQuantity;
+                    summary[eq.type].remaining += this.getRemainingCount(eq.id);
+                });
+                return summary;
+            }
+
+            getUnreturnedBorrows() {
+                return this.borrowRecords.filter(br => {
+                    const returned = this.getReturnedCount(br.id);
+                    return returned < br.quantity;
+                });
+            }
+
+            render() {
+                const app = document.getElementById('app');
+                app.innerHTML = `
+                    <div class="flex justify-between items-center mb-8">
+                        <h1 class="text-4xl font-bold text-indigo-900">ระบบฐานข้อมูลอุปกรณ์</h1>
+                        <div>
+                            ${this.isConnected ? 
+                                '<div class="flex items-center gap-2 bg-green-100 text-green-700 px-4 py-2 rounded-lg font-semibold">✓ เชื่อมต่อ Google Sheets</div>' :
+                                '<button onclick="app.showSetup = true; app.render();" class="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700">เชื่อมต่อ Google Sheets</button>'
+                            }
+                        </div>
+                    </div>
+
+                    ${this.showSetup ? this.renderSetup() : ''}
+                    ${this.showEditModal ? this.renderEditModal() : ''}
+
+                    <div class="bg-white rounded-lg shadow-lg">
+                        <div class="flex border-b overflow-x-auto">
+                            ${this.renderTab('equipment', '📦 อุปกรณ์')}
+                            ${this.renderTab('borrow', '📋 ยืม')}
+                            ${this.renderTab('return', '↩️ คืน')}
+                            ${this.renderTab('transfer', '🔄 โอน')}
+                            ${this.renderTab('claim', '🔧 เคลม')}
+                            ${this.renderTab('summary', '📊 สรุป')}
+                        </div>
+                        <div class="p-6">
+                            ${this.renderContent()}
+                        </div>
+                    </div>
+                `;
+            }
+
+            renderTab(tab, label) {
+                const active = this.activeTab === tab;
+                return `<button onclick="app.activeTab='${tab}'; app.render();" 
+                    class="px-6 py-4 font-semibold whitespace-nowrap ${active ? 'border-b-2 border-indigo-600 text-indigo-600' : 'text-gray-600 hover:text-indigo-600'}">
+                    ${label}
+                </button>`;
+            }
+
+            renderSetup() {
+                return `
+                    <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onclick="if(event.target === this) { app.showSetup = false; app.render(); }">
+                        <div class="bg-white rounded-lg p-8 max-w-2xl w-full mx-4 max-h-screen overflow-y-auto" onclick="event.stopPropagation();">
+                            <h2 class="text-2xl font-bold text-indigo-900 mb-6">เชื่อมต่อ Google Sheets</h2>
+                            
+                            ${!CLIENT_ID || CLIENT_ID === '' ? `
+                                <div class="bg-red-50 border-2 border-red-300 rounded-lg p-6 mb-6">
+                                    <h3 class="text-lg font-bold text-red-800 mb-3">❌ ยังไม่ได้ตั้งค่า CLIENT_ID</h3>
+                                    <p class="text-red-700 mb-4">คุณต้องแก้ไขไฟล์ HTML ก่อนถึงจะใช้งานได้</p>
+                                    <div class="bg-white rounded p-4 mb-4">
+                                        <p class="font-semibold mb-2">ขั้นตอน:</p>
+                                        <ol class="list-decimal list-inside space-y-2 text-sm">
+                                            <li>เปิดไฟล์ HTML ด้วย Notepad</li>
+                                            <li>กด Ctrl+F ค้นหา: <code class="bg-gray-200 px-2 py-1">const CLIENT_ID = '';</code></li>
+                                            <li>แก้เป็น: <code class="bg-gray-200 px-2 py-1">const CLIENT_ID = 'YOUR_ID.apps.googleusercontent.com';</code></li>
+                                            <li>บันทึกไฟล์และอัปโหลดใหม่</li>
+                                        </ol>
+                                    </div>
+                                    <p class="text-sm text-red-600">
+                                        <strong>หมายเหตุ:</strong> ต้องได้ Client ID จาก Google Cloud Console ก่อน
+                                        <br>ไปที่: console.cloud.google.com → APIs & Services → Credentials
+                                    </p>
+                                </div>
+                            ` : `
+                                <div class="bg-green-50 border border-green-300 rounded-lg p-4 mb-4">
+                                    <p class="text-green-800">✓ ตรวจพบ Client ID แล้ว</p>
+                                    <p class="text-sm text-green-700 mt-1">Client ID: ${CLIENT_ID.substring(0, 20)}...</p>
+                                </div>
+                            `}
+                            
+                            <div class="mb-4">
+                                <label class="block font-semibold mb-2">Spreadsheet ID:</label>
+                                <input type="text" value="${this.spreadsheetId}" 
+                                    oninput="app.spreadsheetId = this.value"
+                                    placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"
+                                    class="w-full px-4 py-2 border rounded-lg">
+                                <p class="text-xs text-gray-500 mt-1">
+                                    จาก URL: https://docs.google.com/spreadsheets/d/<strong>SPREADSHEET_ID</strong>/edit
+                                </p>
+                            </div>
+                            
+                            ${this.accessToken ? `
+                                <div class="bg-blue-50 border border-blue-300 rounded-lg p-4 mb-4">
+                                    <p class="text-blue-800">✓ Login สำเร็จแล้ว</p>
+                                    <p class="text-sm text-blue-700 mt-1">Token: ${this.accessToken.substring(0, 20)}...</p>
+                                </div>
+                            ` : ''}
+                            
+                            <div class="flex gap-4">
+                                <button onclick="app.handleGoogleAuth()" 
+                                    ${!CLIENT_ID || CLIENT_ID === '' ? 'disabled' : ''}
+                                    class="flex-1 bg-red-600 text-white px-6 py-3 rounded-lg hover:bg-red-700 disabled:bg-gray-400 disabled:cursor-not-allowed">
+                                    1. Login with Google ${!CLIENT_ID || CLIENT_ID === '' ? '(ต้องตั้งค่า CLIENT_ID ก่อน)' : ''}
+                                </button>
+                                <button onclick="app.connectToSheet()" 
+                                    ${!this.spreadsheetId || !this.accessToken ? 'disabled' : ''}
+                                    class="flex-1 bg-indigo-600 text-white px-6 py-3 rounded-lg hover:bg-indigo-700 disabled:bg-gray-400 disabled:cursor-not-allowed">
+                                    2. เชื่อมต่อ ${!this.accessToken ? '(Login ก่อน)' : ''}
+                                </button>
+                                <button onclick="app.showSetup = false; app.render();" 
+                                    class="px-6 py-3 border rounded-lg hover:bg-gray-50">ปิด</button>
+                            </div>
+                            
+                            <div class="mt-6 p-4 bg-gray-50 rounded-lg">
+                                <p class="text-sm text-gray-700"><strong>💡 เคล็ดลับ:</strong></p>
+                                <ul class="text-sm text-gray-600 space-y-1 mt-2">
+                                    <li>• กด F12 เพื่อเปิด Console ดูข้อความ Error</li>
+                                    <li>• ตรวจสอบว่า Redirect URI ใน Google Cloud ตรงกับ URL ที่ใช้</li>
+                                    <li>• เพิ่มตัวเองเป็น Test User ใน OAuth Consent Screen</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            renderEditModal() {
+                if (!this.editingEquipment) return '';
+                
+                return `
+                    <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onclick="if(event.target === this) { app.showEditModal = false; app.editingEquipment = null; app.render(); }">
+                        <div class="bg-white rounded-lg p-8 max-w-2xl w-full mx-4" onclick="event.stopPropagation();">
+                            <h2 class="text-2xl font-bold text-indigo-900 mb-6">แก้ไขอุปกรณ์</h2>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                                <div>
+                                    <label class="block font-semibold mb-2">ประเภท:</label>
+                                    <select value="${this.editingEquipment.type}" onchange="app.editingEquipment.type = this.value" class="w-full px-4 py-2 border rounded-lg">
+                                        <option value="AP" ${this.editingEquipment.type === 'AP' ? 'selected' : ''}>AP</option>
+                                        <option value="Switch" ${this.editingEquipment.type === 'Switch' ? 'selected' : ''}>Switch</option>
+                                        <option value="Router" ${this.editingEquipment.type === 'Router' ? 'selected' : ''}>Router</option>
+                                        <option value="Firewall" ${this.editingEquipment.type === 'Firewall' ? 'selected' : ''}>Firewall</option>
+                                        <option value="อื่นๆ" ${this.editingEquipment.type === 'อื่นๆ' ? 'selected' : ''}>อื่นๆ</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="block font-semibold mb-2">ยี่ห้อ:</label>
+                                    <input type="text" value="${this.editingEquipment.brand}" 
+                                        oninput="app.editingEquipment.brand = this.value" 
+                                        class="w-full px-4 py-2 border rounded-lg">
+                                </div>
+                                <div>
+                                    <label class="block font-semibold mb-2">Serial Number:</label>
+                                    <input type="text" value="${this.editingEquipment.serial}" 
+                                        oninput="app.editingEquipment.serial = this.value" 
+                                        class="w-full px-4 py-2 border rounded-lg">
+                                </div>
+                                <div>
+                                    <label class="block font-semibold mb-2">MAC Address:</label>
+                                    <input type="text" value="${this.editingEquipment.mac}" 
+                                        oninput="app.editingEquipment.mac = this.value" 
+                                        class="w-full px-4 py-2 border rounded-lg">
+                                </div>
+                            </div>
+                            <div class="flex gap-4">
+                                <button onclick="app.saveEditEquipment()" class="flex-1 bg-indigo-600 text-white px-6 py-3 rounded-lg hover:bg-indigo-700">
+                                    บันทึก
+                                </button>
+                                <button onclick="app.showEditModal = false; app.editingEquipment = null; app.render();" 
+                                    class="px-6 py-3 border rounded-lg hover:bg-gray-50">ยกเลิก</button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            renderContent() {
+                switch(this.activeTab) {
+                    case 'equipment': return this.renderEquipment();
+                    case 'borrow': return this.renderBorrow();
+                    case 'return': return this.renderReturn();
+                    case 'transfer': return this.renderTransfer();
+                    case 'claim': return this.renderClaim();
+                    case 'summary': return this.renderSummary();
+                }
+            }
+
+            renderEquipment() {
+                const filtered = this.equipment.filter(eq =>
+                    eq.brand.toLowerCase().includes(this.searchTerm.toLowerCase()) ||
+                    eq.serial.toLowerCase().includes(this.searchTerm.toLowerCase()) ||
+                    eq.type.toLowerCase().includes(this.searchTerm.toLowerCase())
+                );
+
+                return `
+                    <div class="bg-indigo-50 rounded-lg p-6 mb-6">
+                        <h2 class="text-xl font-bold text-indigo-900 mb-4">เพิ่มอุปกรณ์ใหม่</h2>
+                        <div class="grid grid-cols-1 md:grid-cols-5 gap-4">
+                            <select onchange="app.newEquipment.type = this.value" class="px-4 py-2 border rounded-lg">
+                                <option value="AP">AP</option>
+                                <option value="Switch">Switch</option>
+                                <option value="Router">Router</option>
+                                <option value="Firewall">Firewall</option>
+                                <option value="อื่นๆ">อื่นๆ</option>
+                            </select>
+                            <input type="text" placeholder="ยี่ห้อ" value="${this.newEquipment.brand}" 
+                                oninput="app.newEquipment.brand = this.value" class="px-4 py-2 border rounded-lg">
+                            <input type="text" placeholder="Serial" value="${this.newEquipment.serial}" 
+                                oninput="app.newEquipment.serial = this.value" class="px-4 py-2 border rounded-lg">
+                            <input type="text" placeholder="MAC" value="${this.newEquipment.mac}" 
+                                oninput="app.newEquipment.mac = this.value" class="px-4 py-2 border rounded-lg">
+                            <button onclick="app.addEquipment()" class="bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-700">
+                                + เพิ่ม
+                            </button>
+                        </div>
+                    </div>
+
+                    <input type="text" placeholder="🔍 ค้นหา..." value="${this.searchTerm}"
+                        oninput="app.searchTerm = this.value; app.render();"
+                        class="w-full px-4 py-2 border rounded-lg mb-4">
+
+                    <div class="overflow-x-auto">
+                        <table class="w-full">
+                            <thead class="bg-indigo-600 text-white">
+                                <tr>
+                                    <th class="px-4 py-3 text-left">ประเภท</th>
+                                    <th class="px-4 py-3 text-left">ยี่ห้อ</th>
+                                    <th class="px-4 py-3 text-left">Serial</th>
+                                    <th class="px-4 py-3 text-left">MAC</th>
+                                    <th class="px-4 py-3 text-center">ยืม</th>
+                                    <th class="px-4 py-3 text-center">คงเหลือ</th>
+                                    <th class="px-4 py-3 text-left">วันที่เพิ่ม</th>
+                                    <th class="px-4 py-3 text-center">จัดการ</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${filtered.length === 0 ? 
+                                    '<tr><td colspan="8" class="text-center py-8 text-gray-500">ไม่พบข้อมูล</td></tr>' :
+                                    filtered.map((eq, i) => `
+                                        <tr class="${i % 2 === 0 ? 'bg-gray-50' : 'bg-white'}">
+                                            <td class="px-4 py-3">${eq.type}</td>
+                                            <td class="px-4 py-3">${eq.brand}</td>
+                                            <td class="px-4 py-3">${eq.serial}</td>
+                                            <td class="px-4 py-3">${eq.mac}</td>
+                                            <td class="px-4 py-3 text-center">${this.getActualBorrowedCount(eq.id)}</td>
+                                            <td class="px-4 py-3 text-center">
+                                                <span class="font-semibold ${this.getRemainingCount(eq.id) === 0 ? 'text-red-600' : 'text-green-600'}">
+                                                    ${this.getRemainingCount(eq.id)}
+                                                </span>
+                                            </td>
+                                            <td class="px-4 py-3">${eq.addedDate}</td>
+                                            <td class="px-4 py-3 text-center">
+                                                <button onclick="app.editEquipment('${eq.id}')" class="bg-blue-500 text-white px-3 py-1 rounded hover:bg-blue-600 text-sm mr-2">
+                                                    ✏️ แก้ไข
+                                                </button>
+                                                <button onclick="app.deleteEquipment('${eq.id}')" class="bg-red-500 text-white px-3 py-1 rounded hover:bg-red-600 text-sm">
+                                                    🗑️ ลบ
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    `).join('')
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                `;
+            }
+
+            renderBorrow() {
+                const filteredEquipment = this.equipment.filter(eq =>
+                    eq.brand.toLowerCase().includes(this.borrowSearchTerm.toLowerCase()) ||
+                    eq.serial.toLowerCase().includes(this.borrowSearchTerm.toLowerCase()) ||
+                    eq.type.toLowerCase().includes(this.borrowSearchTerm.toLowerCase())
+                );
+
+                return `
+                    <div class="bg-green-50 rounded-lg p-6 mb-6">
+                        <h2 class="text-xl font-bold text-green-900 mb-4">บันทึกการยืม</h2>
+                        
+                        <div class="mb-4">
+                            <label class="block font-semibold mb-2">🔍 ค้นหาอุปกรณ์ที่ต้องการยืม:</label>
+                            <input type="text" placeholder="ค้นหาจาก ประเภท, ยี่ห้อ, หรือ Serial..." 
+                                value="${this.borrowSearchTerm}"
+                                oninput="app.borrowSearchTerm = this.value; app.render();"
+                                class="w-full px-4 py-2 border rounded-lg bg-white">
+                        </div>
+                        
+                        <div class="grid grid-cols-1 md:grid-cols-6 gap-4">
+                            <select onchange="app.newBorrow.equipmentId = this.value" class="px-4 py-2 border rounded-lg col-span-2">
+                                <option value="">เลือกอุปกรณ์</option>
+                                ${filteredEquipment.map(eq => {
+                                    const remaining = this.getRemainingCount(eq.id);
+                                    return `
+                                        <option value="${eq.id}" ${remaining === 0 ? 'disabled' : ''}>
+                                            ${eq.type} - ${eq.brand} (${eq.serial}) ${remaining > 0 ? `[เหลือ: ${remaining}]` : '[ไม่มีเหลือ]'}
+                                        </option>
+                                    `;
+                                }).join('')}
+                            </select>
+                            <input type="text" placeholder="ผู้ยืม" value="${this.newBorrow.borrower}"
+                                oninput="app.newBorrow.borrower = this.value" class="px-4 py-2 border rounded-lg">
+                            <input type="text" placeholder="ผู้อนุมัติ" value="${this.newBorrow.approver}"
+                                oninput="app.newBorrow.approver = this.value" class="px-4 py-2 border rounded-lg">
+                            <input type="number" placeholder="จำนวน" value="${this.newBorrow.quantity}" min="1"
+                                oninput="app.newBorrow.quantity = this.value" class="px-4 py-2 border rounded-lg">
+                            <input type="date" value="${this.newBorrow.date}"
+                                oninput="app.newBorrow.date = this.value" class="px-4 py-2 border rounded-lg">
+                        </div>
+                        <button onclick="app.addBorrowRecord()" class="mt-4 bg-green-600 text-white px-6 py-2 rounded-lg hover:bg-green-700">
+                            + บันทึกการยืม
+                        </button>
+                    </div>
+
+                    <div class="overflow-x-auto">
+                        <table class="w-full">
+                            <thead class="bg-green-600 text-white">
+                                <tr>
+                                    <th class="px-4 py-3 text-left">วันที่</th>
+                                    <th class="px-4 py-3 text-left">อุปกรณ์</th>
+                                    <th class="px-4 py-3 text-left">ผู้ยืม</th>
+                                    <th class="px-4 py-3 text-left">ผู้อนุมัติ</th>
+                                    <th class="px-4 py-3 text-center">จำนวน</th>
+                                    <th class="px-4 py-3 text-center">คืนแล้ว</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${this.borrowRecords.length === 0 ?
+                                    '<tr><td colspan="6" class="text-center py-8 text-gray-500">ยังไม่มีบันทึก</td></tr>' :
+                                    this.borrowRecords.map((br, i) => {
+                                        const eq = this.equipment.find(e => e.id === br.equipmentId);
+                                        const returned = this.getReturnedCount(br.id);
+                                        return `
+                                            <tr class="${i % 2 === 0 ? 'bg-gray-50' : 'bg-white'}">
+                                                <td class="px-4 py-3">${br.date}</td>
+                                                <td class="px-4 py-3">${eq ? `${eq.type} - ${eq.brand} (${eq.serial})` : 'ไม่พบข้อมูล'}</td>
+                                                <td class="px-4 py-3">${br.borrower}</td>
+                                                <td class="px-4 py-3">${br.approver}</td>
+                                                <td class="px-4 py-3 text-center">${br.quantity}</td>
+                                                <td class="px-4 py-3 text-center">
+                                                    <span class="${returned === br.quantity ? 'text-green-600' : 'text-orange-600'} font-semibold">
+                                                        ${returned}/${br.quantity}
+                                                    </span>
+                                                </td>
+                                            </tr>
+                                        `;
+                                    }).join('')
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                `;
+            }
+
+            renderReturn() {
+                const unreturned = this.getUnreturnedBorrows();
+                const filteredUnreturned = unreturned.filter(br => {
+                    const eq = this.equipment.find(e => e.id === br.equipmentId);
+                    if (!eq) return false;
+                    const searchLower = this.returnSearchTerm.toLowerCase();
+                    return eq.brand.toLowerCase().includes(searchLower) ||
+                           eq.serial.toLowerCase().includes(searchLower) ||
+                           eq.type.toLowerCase().includes(searchLower) ||
+                           br.borrower.toLowerCase().includes(searchLower);
+                });
+                
+                return `
+                    <div class="bg-orange-50 rounded-lg p-6 mb-6">
+                        <h2 class="text-xl font-bold text-orange-900 mb-4">บันทึกการคืน</h2>
+                        
+                        <div class="mb-4">
+                            <label class="block font-semibold mb-2">🔍 ค้นหารายการยืมที่ต้องการคืน:</label>
+                            <input type="text" placeholder="ค้นหาจาก ประเภท, ยี่ห้อ, Serial, หรือชื่อผู้ยืม..." 
+                                value="${this.returnSearchTerm}"
+                                oninput="app.returnSearchTerm = this.value; app.render();"
+                                class="w-full px-4 py-2 border rounded-lg bg-white">
+                        </div>
+                        
+                        <div class="grid grid-cols-1 md:grid-cols-5 gap-4">
+                            <select onchange="app.newReturn.borrowRecordId = this.value; app.render();" class="px-4 py-2 border rounded-lg col-span-2">
+                                <option value="">เลือกรายการยืม</option>
+                                ${filteredUnreturned.map(br => {
+                                    const eq = this.equipment.find(e => e.id === br.equipmentId);
+                                    const returned = this.getReturnedCount(br.id);
+                                    const remaining = br.quantity - returned;
+                                    return `
+                                        <option value="${br.id}">
+                                            ${eq ? `${eq.type} - ${eq.brand} (${eq.serial})` : 'ไม่พบ'} | ${br.borrower} | คงเหลือ: ${remaining}
+                                        </option>
+                                    `;
+                                }).join('')}
+                            </select>
+                            <input type="number" placeholder="จำนวนคืน" value="${this.newReturn.returnQuantity}" min="1"
+                                oninput="app.newReturn.returnQuantity = this.value" class="px-4 py-2 border rounded-lg">
+                            <input type="date" value="${this.newReturn.returnDate}"
+                                oninput="app.newReturn.returnDate = this.value" class="px-4 py-2 border rounded-lg">
+                            <select onchange="app.newReturn.condition = this.value" class="px-4 py-2 border rounded-lg">
+                                <option value="ปกติ">ปกติ</option>
+                                <option value="ชำรุด">ชำรุด</option>
+                                <option value="สูญหาย">สูญหาย</option>
+                            </select>
+                        </div>
+                        <button onclick="app.addReturnRecord()" class="mt-4 bg-orange-600 text-white px-6 py-2 rounded-lg hover:bg-orange-700">
+                            ↩️ บันทึกการคืน
+                        </button>
+                        
+                        ${this.returnSearchTerm && filteredUnreturned.length === 0 ? 
+                            '<p class="mt-4 text-orange-600">ไม่พบรายการที่ค้นหา</p>' : 
+                            ''}
+                    </div>
+
+                    <div class="overflow-x-auto">
+                        <table class="w-full">
+                            <thead class="bg-orange-600 text-white">
+                                <tr>
+                                    <th class="px-4 py-3 text-left">วันที่คืน</th>
+                                    <th class="px-4 py-3 text-left">อุปกรณ์</th>
+                                    <th class="px-4 py-3 text-left">ผู้ยืม</th>
+                                    <th class="px-4 py-3 text-center">จำนวนคืน</th>
+                                    <th class="px-4 py-3 text-left">สภาพ</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${this.returnRecords.length === 0 ?
+                                    '<tr><td colspan="5" class="text-center py-8 text-gray-500">ยังไม่มีบันทึกการคืน</td></tr>' :
+                                    this.returnRecords.map((rt, i) => {
+                                        const br = this.borrowRecords.find(b => b.id === rt.borrowRecordId);
+                                        const eq = br ? this.equipment.find(e => e.id === br.equipmentId) : null;
+                                        return `
+                                            <tr class="${i % 2 === 0 ? 'bg-gray-50' : 'bg-white'}">
+                                                <td class="px-4 py-3">${rt.returnDate}</td>
+                                                <td class="px-4 py-3">${eq ? `${eq.type} - ${eq.brand} (${eq.serial})` : 'ไม่พบข้อมูล'}</td>
+                                                <td class="px-4 py-3">${br ? br.borrower : '-'}</td>
+                                                <td class="px-4 py-3 text-center">${rt.returnQuantity}</td>
+                                                <td class="px-4 py-3">
+                                                    <span class="px-3 py-1 rounded-full text-sm ${
+                                                        rt.condition === 'ปกติ' ? 'bg-green-100 text-green-800' :
+                                                        rt.condition === 'ชำรุด' ? 'bg-yellow-100 text-yellow-800' :
+                                                        'bg-red-100 text-red-800'
+                                                    }">
+                                                        ${rt.condition}
+                                                    </span>
+                                                </td>
+                                            </tr>
+                                        `;
+                                    }).join('')
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                `;
+            }
+
+            renderTransfer() {
+                const filteredEquipment = this.equipment.filter(eq =>
+                    eq.brand.toLowerCase().includes(this.transferSearchTerm.toLowerCase()) ||
+                    eq.serial.toLowerCase().includes(this.transferSearchTerm.toLowerCase()) ||
+                    eq.type.toLowerCase().includes(this.transferSearchTerm.toLowerCase())
+                );
+
+                return `
+                    <div class="bg-blue-50 rounded-lg p-6 mb-6">
+                        <h2 class="text-xl font-bold text-blue-900 mb-4">บันทึกการโอนอุปกรณ์</h2>
+                        
+                        <div class="mb-4">
+                            <label class="block font-semibold mb-2">🔍 ค้นหาอุปกรณ์ที่ต้องการโอน:</label>
+                            <input type="text" placeholder="ค้นหาจาก ประเภท, ยี่ห้อ, หรือ Serial..." 
+                                value="${this.transferSearchTerm}"
+                                oninput="app.transferSearchTerm = this.value; app.render();"
+                                class="w-full px-4 py-2 border rounded-lg bg-white">
+                        </div>
+                        
+                        <div class="grid grid-cols-1 md:grid-cols-6 gap-4">
+                            <select onchange="app.newTransfer.equipmentId = this.value" class="px-4 py-2 border rounded-lg col-span-2">
+                                <option value="">เลือกอุปกรณ์</option>
+                                ${filteredEquipment.map(eq => `
+                                    <option value="${eq.id}">${eq.type} - ${eq.brand} (${eq.serial})</option>
+                                `).join('')}
+                            </select>
+                            <input type="text" placeholder="จากสถานที่" value="${this.newTransfer.fromLocation}"
+                                oninput="app.newTransfer.fromLocation = this.value" class="px-4 py-2 border rounded-lg">
+                            <input type="text" placeholder="ไปยังสถานที่" value="${this.newTransfer.toLocation}"
+                                oninput="app.newTransfer.toLocation = this.value" class="px-4 py-2 border rounded-lg">
+                            <input type="date" value="${this.newTransfer.transferDate}"
+                                oninput="app.newTransfer.transferDate = this.value" class="px-4 py-2 border rounded-lg">
+                            <input type="text" placeholder="หมายเหตุ" value="${this.newTransfer.note}"
+                                oninput="app.newTransfer.note = this.value" class="px-4 py-2 border rounded-lg">
+                        </div>
+                        <button onclick="app.addTransferRecord()" class="mt-4 bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700">
+                            🔄 บันทึกการโอน
+                        </button>
+                    </div>
+
+                    <div class="overflow-x-auto">
+                        <table class="w-full">
+                            <thead class="bg-blue-600 text-white">
+                                <tr>
+                                    <th class="px-4 py-3 text-left">วันที่</th>
+                                    <th class="px-4 py-3 text-left">อุปกรณ์</th>
+                                    <th class="px-4 py-3 text-left">จาก</th>
+                                    <th class="px-4 py-3 text-left">ถึง</th>
+                                    <th class="px-4 py-3 text-left">หมายเหตุ</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${this.transferRecords.length === 0 ?
+                                    '<tr><td colspan="5" class="text-center py-8 text-gray-500">ยังไม่มีบันทึกการโอน</td></tr>' :
+                                    this.transferRecords.map((tr, i) => {
+                                        const eq = this.equipment.find(e => e.id === tr.equipmentId);
+                                        return `
+                                            <tr class="${i % 2 === 0 ? 'bg-gray-50' : 'bg-white'}">
+                                                <td class="px-4 py-3">${tr.transferDate}</td>
+                                                <td class="px-4 py-3">${eq ? `${eq.type} - ${eq.brand} (${eq.serial})` : 'ไม่พบข้อมูล'}</td>
+                                                <td class="px-4 py-3">${tr.fromLocation}</td>
+                                                <td class="px-4 py-3">${tr.toLocation}</td>
+                                                <td class="px-4 py-3">${tr.note}</td>
+                                            </tr>
+                                        `;
+                                    }).join('')
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                `;
+            }
+
+            renderClaim() {
+                const filteredEquipment = this.equipment.filter(eq =>
+                    eq.brand.toLowerCase().includes(this.claimSearchTerm.toLowerCase()) ||
+                    eq.serial.toLowerCase().includes(this.claimSearchTerm.toLowerCase()) ||
+                    eq.type.toLowerCase().includes(this.claimSearchTerm.toLowerCase())
+                );
+
+                return `
+                    <div class="bg-purple-50 rounded-lg p-6 mb-6">
+                        <h2 class="text-xl font-bold text-purple-900 mb-4">บันทึกการส่งเคลม</h2>
+                        
+                        <div class="mb-4">
+                            <label class="block font-semibold mb-2">🔍 ค้นหาอุปกรณ์ที่ต้องการเคลม:</label>
+                            <input type="text" placeholder="ค้นหาจาก ประเภท, ยี่ห้อ, หรือ Serial..." 
+                                value="${this.claimSearchTerm}"
+                                oninput="app.claimSearchTerm = this.value; app.render();"
+                                class="w-full px-4 py-2 border rounded-lg bg-white">
+                        </div>
+                        
+                        <div class="grid grid-cols-1 md:grid-cols-6 gap-4">
+                            <select onchange="app.newClaim.equipmentId = this.value" class="px-4 py-2 border rounded-lg col-span-2">
+                                <option value="">เลือกอุปกรณ์</option>
+                                ${filteredEquipment.map(eq => `
+                                    <option value="${eq.id}">${eq.type} - ${eq.brand} (${eq.serial})</option>
+                                `).join('')}
+                            </select>
+                            <input type="date" value="${this.newClaim.claimDate}"
+                                oninput="app.newClaim.claimDate = this.value" class="px-4 py-2 border rounded-lg">
+                            <input type="text" placeholder="ปัญหา/อาการ" value="${this.newClaim.issue}"
+                                oninput="app.newClaim.issue = this.value" class="px-4 py-2 border rounded-lg">
+                            <select onchange="app.newClaim.claimStatus = this.value" class="px-4 py-2 border rounded-lg">
+                                <option value="รอส่ง">รอส่ง</option>
+                                <option value="ส่งแล้ว">ส่งแล้ว</option>
+                                <option value="รับคืนแล้ว">รับคืนแล้ว</option>
+                                <option value="ไม่รับเคลม">ไม่รับเคลม</option>
+                            </select>
+                            <input type="text" placeholder="หมายเหตุ" value="${this.newClaim.note}"
+                                oninput="app.newClaim.note = this.value" class="px-4 py-2 border rounded-lg">
+                        </div>
+                        <button onclick="app.addClaimRecord()" class="mt-4 bg-purple-600 text-white px-6 py-2 rounded-lg hover:bg-purple-700">
+                            🔧 บันทึกการเคลม
+                        </button>
+                    </div>
+
+                    <div class="overflow-x-auto">
+                        <table class="w-full">
+                            <thead class="bg-purple-600 text-white">
+                                <tr>
+                                    <th class="px-4 py-3 text-left">วันที่</th>
+                                    <th class="px-4 py-3 text-left">อุปกรณ์</th>
+                                    <th class="px-4 py-3 text-left">ปัญหา</th>
+                                    <th class="px-4 py-3 text-left">สถานะ</th>
+                                    <th class="px-4 py-3 text-left">หมายเหตุ</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${this.claimRecords.length === 0 ?
+                                    '<tr><td colspan="5" class="text-center py-8 text-gray-500">ยังไม่มีบันทึกการเคลม</td></tr>' :
+                                    this.claimRecords.map((cl, i) => {
+                                        const eq = this.equipment.find(e => e.id === cl.equipmentId);
+                                        return `
+                                            <tr class="${i % 2 === 0 ? 'bg-gray-50' : 'bg-white'}">
+                                                <td class="px-4 py-3">${cl.claimDate}</td>
+                                                <td class="px-4 py-3">${eq ? `${eq.type} - ${eq.brand} (${eq.serial})` : 'ไม่พบข้อมูล'}</td>
+                                                <td class="px-4 py-3">${cl.issue}</td>
+                                                <td class="px-4 py-3">
+                                                    <span class="px-3 py-1 rounded-full text-sm ${
+                                                        cl.claimStatus === 'รอส่ง' ? 'bg-yellow-100 text-yellow-800' :
+                                                        cl.claimStatus === 'ส่งแล้ว' ? 'bg-blue-100 text-blue-800' :
+                                                        cl.claimStatus === 'รับคืนแล้ว' ? 'bg-green-100 text-green-800' :
+                                                        'bg-red-100 text-red-800'
+                                                    }">
+                                                        ${cl.claimStatus}
+                                                    </span>
+                                                </td>
+                                                <td class="px-4 py-3">${cl.note}</td>
+                                            </tr>
+                                        `;
+                                    }).join('')
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                `;
+            }
+
+            renderSummary() {
+                const summary = this.getSummary();
+                const entries = Object.entries(summary);
+                
+                return `
+                    <h2 class="text-2xl font-bold text-indigo-900 mb-6">สรุปอุปกรณ์ทั้งหมด</h2>
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                        ${entries.length === 0 ?
+                            '<div class="col-span-full text-center py-12 text-gray-500">ยังไม่มีข้อมูล</div>' :
+                            entries.map(([type, data]) => `
+                                <div class="bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg p-6 text-white shadow-lg">
+                                    <h3 class="text-xl font-bold mb-4">${type}</h3>
+                                    <div class="space-y-2">
+                                        <div class="flex justify-between items-center">
+                                            <span class="text-indigo-100">จำนวนทั้งหมด:</span>
+                                            <span class="text-2xl font-bold">${data.total}</span>
+                                        </div>
+                                        <div class="flex justify-between items-center">
+                                            <span class="text-indigo-100">กำลังยืม:</span>
+                                            <span class="text-2xl font-bold">${data.total - data.remaining}</span>
+                                        </div>
+                                        <div class="flex justify-between items-center">
+                                            <span class="text-indigo-100">คงเหลือ:</span>
+                                            <span class="text-2xl font-bold">${data.remaining}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            `).join('')
+                        }
+                    </div>
+                    
+                    <div class="mt-8 grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div class="bg-white rounded-lg p-6 shadow">
+                            <h3 class="text-xl font-bold text-gray-800 mb-4">สถิติการยืม-คืน</h3>
+                            <div class="space-y-2">
+                                <div class="flex justify-between">
+                                    <span>รายการยืมทั้งหมด:</span>
+                                    <span class="font-bold">${this.borrowRecords.length}</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>รายการคืนแล้ว:</span>
+                                    <span class="font-bold">${this.returnRecords.length}</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>ยังไม่คืน:</span>
+                                    <span class="font-bold text-orange-600">${this.getUnreturnedBorrows().length}</span>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="bg-white rounded-lg p-6 shadow">
+                            <h3 class="text-xl font-bold text-gray-800 mb-4">สถิติอื่นๆ</h3>
+                            <div class="space-y-2">
+                                <div class="flex justify-between">
+                                    <span>การโอนอุปกรณ์:</span>
+                                    <span class="font-bold">${this.transferRecords.length}</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>ส่งเคลม:</span>
+                                    <span class="font-bold">${this.claimRecords.length}</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>อุปกรณ์ทั้งหมด:</span>
+                                    <span class="font-bold text-indigo-600">${this.equipment.length}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+        }
+
+        // Initialize app
+        const app = new EquipmentApp();
+    </script>
+</body>
+</html>
